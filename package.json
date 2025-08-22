@@ -5,6 +5,11 @@
 	"main": "src/index.js",
 	"scripts": {
 		"start": "node src/index.js",
+		"dev:server": "node src/index.js",
+		"dev:web": "npm run dev --prefix web",
+		"dev": "concurrently -k -n server,web -c blue,magenta \"npm:dev:server\" \"npm:dev:web\"",
+		"build:web": "npm run build --prefix web",
+		"build": "npm run build:web",
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},
 	"repository": {
@@ -26,5 +31,8 @@
 		"lodash": "^4.17.21",
 		"socket.io": "^4.1.1",
 		"uuid": "^8.3.2"
+	},
+	"devDependencies": {
+		"concurrently": "^9.2.0"
 	}
 }

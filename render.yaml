@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: among-us-irl
+    env: node
+    plan: free
+    buildCommand: npm ci && npm ci --prefix web && npm run build
+    startCommand: NODE_ENV=production node src/index.js
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: VITE_ADMIN_CODE
+        sync: false
+
