@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
-import { Alert, Backdrop, Box, Card, CardContent, Checkbox, FormControlLabel, LinearProgress, List, ListItem, ListItemText, Stack, Typography } from '@mui/material';
+import { Alert, Backdrop, Box, Card, CardContent, Checkbox, FormControlLabel, LinearProgress, List, ListItem, ListItemText, Stack, Typography, Dialog, DialogContent, IconButton, Tooltip } from '@mui/material';
+import MapIcon from '@mui/icons-material/Map';
 
 export default function Player() {
   const [tasks, setTasks] = useState({});
@@ -12,6 +13,7 @@ export default function Player() {
   const [gameActive, setGameActive] = useState(false);
   const [isImpostor, setIsImpostor] = useState(false);
   const [killCooldownRemainingMs, setKillCooldownRemainingMs] = useState(0);
+  const [mapOpen, setMapOpen] = useState(false);
 
   useEffect(() => {
     const socket = io({ query: { role: 'PLAYER' } });
@@ -85,6 +87,16 @@ export default function Player() {
             <Typography variant="h5" align="center">GAME NOT STARTED</Typography>
           </CardContent>
         </Card>
+        <Tooltip title="Open Map">
+          <IconButton color="primary" onClick={() => setMapOpen(true)}>
+            <MapIcon />
+          </IconButton>
+        </Tooltip>
+        <Dialog open={mapOpen} onClose={() => setMapOpen(false)} maxWidth="lg">
+          <DialogContent sx={{ p: 0 }}>
+            <Box component="img" src="/images/MAP.JPG" alt="Map" sx={{ maxWidth: '90vw', maxHeight: '80vh', display: 'block' }} />
+          </DialogContent>
+        </Dialog>
       </Stack>
     );
   }
@@ -116,6 +128,11 @@ export default function Player() {
             )}
           </Box>
         )}
+        <Tooltip title="Open Map">
+          <IconButton color="primary" onClick={() => setMapOpen(true)}>
+            <MapIcon />
+          </IconButton>
+        </Tooltip>
       </Stack>
 
       {role ? (
@@ -154,6 +171,12 @@ export default function Player() {
       <Backdrop open={meeting} sx={{ color: '#fff', zIndex: (t) => t.zIndex.drawer + 1 }}>
         <Typography variant="h4" align="center">COME BACK FOR A MEETING</Typography>
       </Backdrop>
+
+      <Dialog open={mapOpen} onClose={() => setMapOpen(false)} maxWidth="lg">
+        <DialogContent sx={{ p: 0 }}>
+          <Box component="img" src="/images/MAP.JPG" alt="Map" sx={{ maxWidth: '90vw', maxHeight: '80vh', display: 'block' }} />
+        </DialogContent>
+      </Dialog>
     </Stack>
   );
 }
