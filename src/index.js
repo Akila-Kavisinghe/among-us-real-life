@@ -17,20 +17,20 @@ const io = new Server(server, {
 });
 
 const TASKS = [
-	'Flip the light bulbs on or off (THE DOME)',
-	'Set the A/C to 16 or 20 (THE DOME)',
-	'Start a fire (wait 20 seconds at the fire) (FIRE PIT)',
-	'Sit at picnic bench (30 seconds) (OUTSIDE)',
-	'Sit in the sauna (wait 30 seconds) (SAUNA)',
-	'Shoot cans (picnic tables) (reset)',
-	'Put the hose back (reset) (THE SHED)',
-	'Pump the bike pump 5 times (THE PORCH)',
-	'Sweep the whole porch (THE PORCH)',
+	// 'Flip the light bulbs on or off (THE DOME)',
+	// 'Set the A/C to 16 or 20 (THE DOME)',
+	// 'Start a fire (wait 20 seconds at the fire) (FIRE PIT)',
+	// 'Sit at picnic bench (30 seconds) (OUTSIDE)',
+	// 'Sit in the sauna (wait 30 seconds) (SAUNA)',
+	// 'Shoot cans (picnic tables) (reset)',
+	// 'Put the hose back (reset) (THE SHED)',
+	// 'Pump the bike pump 5 times (THE PORCH)',
+	// 'Sweep the whole porch (THE PORCH)',
 	'Build a house of cards (2 layers) (LIVING FIRST FLOOR)',
 	'Get ring on the hook (DINING)',
 	'Flip the light switch on or off (LIVING FIRST FLOOR)',
-	'Wash your hands (KITCHEN)',
-	'Fill a cup of water (KITCHEN)',
+	// 'Wash your hands (KITCHEN)',
+	'Fill 3 cups of water (KITCHEN)',
 	'Climb the bunkbed (BR3)',
 	'Hide in the closet (30 seconds) (BR3)',
 	'Flip both light switches (BR2)',
@@ -38,22 +38,22 @@ const TASKS = [
 	'Flip both light switches (BR1)',
 	'Flush the toilet (BATH 1st Floor)',
 	'Wash your handss (BATH 1st Floor)',
-	'Set thermostat to 22.5 or 23 (1st floor hallway)',
+	'Set thermostat to 25 and 20 then 23 (1st floor hallway)',
 	'Put on life jacket and take off (basement stairs)',
 	'Pick up and put snowshoe on the shelf (STORAGE)',
-	'Turn lamp switch on or off (BR4)',
+	// 'Turn lamp switch on or off (BR4)',
 	'Climb bunch bed (BR4)',
 	'Hide in closet (30 seconds) (BR4)',
 	'Flush toilet (BATH basement)',
 	'Wash hands (BATH basement)',
 	'Serve a ping pong (LIVING basement)',
 	'Flip lamp on off (LIVING basement)',
-	'Set A/C to 66 or 67 and turn off (LIVING basement)',
-	'Fix the satellite dish (30 seconds) (OUTSIDE front)',
-	'2 Ball in hoop (OUTSIDE front)',
-	'Fix car engine BMW(30 seconds) (outside front)',
-	'Fix car engine CX-30(30 seconds) (outside front)',
-	'Put BBQ fork in bag (reset) (FRONT DECK)'
+	'Set A/C to 50 and 60 and 67 and turn off (LIVING basement)',
+	// 'Fix the satellite dish (30 seconds) (OUTSIDE front)',
+	// '2 Ball in hoop (OUTSIDE front)',
+	// 'Fix car engine BMW(30 seconds) (outside front)',
+	// 'Fix car engine CX-30(30 seconds) (outside front)',
+	// 'Put BBQ fork in bag (reset) (FRONT DECK)'
 ];
 const N_TASKS = 5;
 const N_IMPOSTORS = 1;
@@ -65,12 +65,26 @@ let gameConfig = {
 	tasks: TASKS,
 	numImpostors: N_IMPOSTORS,
 	emergencyCooldownMinutes: 0,
-	killCooldownSeconds: 0
+	killCooldownSeconds: 0,
+	// Max number of players that can receive the same task label
+	maxPlayersPerTask: 2,
+	// New: sabotage duration in seconds
+	sabotageDurationSeconds: 20
 };
 let emergencyCooldownEndMs = 0;
 let lastMeetingType = null; // 'emergency' | 'report' | null
 let impostorIds = new Set();
 let killCooldownEndMsBySocketId = {};
+// Auth-based mappings for reconnect/rehydration
+let socketIdToAuth = {};
+let authToPlayer = {}; // auth -> { role: string, tasks: { [taskId]: label } }
+let impostorAuths = new Set();
+let killCooldownEndMsByAuth = {};
+// Sabotage state
+let isSabotageActive = false;
+let sabotageEndMs = 0;
+let sabotageTimeout = null;
+let sabotageUsedAuths = new Set();
 
 app.use('/', express.static(path.join(__dirname, 'public')));
 
@@ -97,8 +111,13 @@ io.on('connection', socket => {
 		}`
 	);
 
+	// Associate socket with auth token (fallback to socket.id)
+	const auth = socket.handshake.query.auth || socket.id;
+	socketIdToAuth[socket.id] = auth;
+	console.log('[connect] socket', socket.id, 'auth', auth);
+
 	// Send current state to newly connected clients
-	socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig });
+	socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
 
 	// If the connecting socket is an impostor, send its kill cooldown snapshot
 	if (isGameActive && impostorIds.has(socket.id)) {
@@ -106,18 +125,53 @@ io.on('connection', socket => {
 		socket.emit('kill-cooldown-updated', { endMs });
 	}
 
-	// If a player joins mid-game, tell them their role so UI reflects correctly
+	// If a player joins mid-game, rehydrate role and cooldown if known
 	if (isGameActive && socket.handshake.query.role === 'PLAYER') {
-		if (impostorIds.has(socket.id)) {
+		if (impostorAuths.has(auth)) {
+			impostorIds.add(socket.id);
+			const endMs = killCooldownEndMsByAuth[auth] || 0;
+			killCooldownEndMsBySocketId[socket.id] = endMs;
 			socket.emit('role', 'Impostor');
-		} else {
+			socket.emit('kill-cooldown-updated', { endMs });
+			console.log('[rehydrate] impostor', { socketId: socket.id, auth, endMs });
+		} else if (authToPlayer[auth]?.role === 'Crewmate') {
 			socket.emit('role', 'Crewmate');
+			console.log('[rehydrate] crewmate', { socketId: socket.id, auth });
 		}
 	}
 
 	// Allow clients to request a fresh snapshot of state
 	socket.on('get-state', () => {
-		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig });
+		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
+		console.log('[get-state]', { socketId: socket.id, auth: socketIdToAuth[socket.id], isMeeting, isGameActive, emergencyCooldownEndMs });
+	});
+
+	// Rehydration: client asks who am I with its auth
+	socket.on('whoami', (payload) => {
+		const incomingAuth = (payload && typeof payload === 'object' && payload.auth) ? String(payload.auth) : (socket.handshake.query.auth || socket.id);
+		const info = authToPlayer[incomingAuth];
+		// Always send state snapshot
+		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
+		console.log('[whoami]', { socketId: socket.id, incomingAuth, found: !!info, role: info?.role, tasks: info ? Object.keys(info.tasks || {}).length : 0, impostor: impostorAuths.has(incomingAuth) });
+		if (!info) return;
+		if (info.role) socket.emit('role', info.role);
+		if (info.tasks) socket.emit('tasks', info.tasks);
+		socket.emit('tasks-completed', getCompletionMapForAuth(incomingAuth));
+		// Hydrate sabotage status
+		socket.emit('sabotage-usage', { used: sabotageUsedAuths.has(incomingAuth) });
+		if (isSabotageActive && sabotageEndMs > Date.now()) {
+			socket.emit('sabotage-started', { endMs: sabotageEndMs });
+		}
+		// Send current progress so the client can hydrate the progress bar
+		const vals = Object.values(taskProgress);
+		const ratio = vals.length ? vals.filter(Boolean).length / vals.length : 0;
+		socket.emit('progress', ratio);
+		if (impostorAuths.has(incomingAuth)) {
+			impostorIds.add(socket.id);
+			const endMs = killCooldownEndMsByAuth[incomingAuth] || 0;
+			killCooldownEndMsBySocketId[socket.id] = endMs;
+			socket.emit('kill-cooldown-updated', { endMs });
+		}
 	});
 
 	socket.on('start-game', payload => {
@@ -135,7 +189,14 @@ io.on('connection', socket => {
 			if (typeof payload.killCooldownSeconds === 'number' && payload.killCooldownSeconds >= 0) {
 				gameConfig.killCooldownSeconds = payload.killCooldownSeconds;
 			}
+			if (typeof payload.maxPlayersPerTask === 'number' && payload.maxPlayersPerTask > 0) {
+				gameConfig.maxPlayersPerTask = payload.maxPlayersPerTask;
+			}
+			if (typeof payload.sabotageDurationSeconds === 'number' && payload.sabotageDurationSeconds >= 0) {
+				gameConfig.sabotageDurationSeconds = payload.sabotageDurationSeconds;
+			}
 		}
+		console.log('[start-game] config', gameConfig);
 		// Get player sockets
 		const players = [];
 		for (const [_, socket] of io.of('/').sockets) {
@@ -144,7 +205,7 @@ io.on('connection', socket => {
 			}
 		}
 		const playerIds = players.map(player => player.id);
-		console.log('player sockets', players.length);
+		console.log('[start-game] player sockets', players.length);
 
 		// Guard: need at least 1 player
 		if (playerIds.length === 0) {
@@ -155,57 +216,116 @@ io.on('connection', socket => {
 		const impostorCount = Math.max(1, Math.min(gameConfig.numImpostors || 1, playerIds.length));
 		const impostors = _.shuffle(playerIds).slice(0, impostorCount);
 		impostorIds = new Set(impostors);
+		// Build auth mapping for players and reset persisted maps
+		const authBySocketId = {};
+		for (const p of players) {
+			authBySocketId[p.id] = p.handshake.query.auth || p.id;
+		}
+		impostorAuths = new Set(impostors.map(id => authBySocketId[id]));
+		const uniqueAuths = Array.from(new Set(Object.values(authBySocketId)));
+		console.log('[start-game] impostors (socketIds)', Array.from(impostorIds));
+		console.log('[start-game] impostors (auths)', Array.from(impostorAuths));
+		console.log('[start-game] unique players (auths)', uniqueAuths);
+		authToPlayer = {};
+		killCooldownEndMsByAuth = {};
 		killCooldownEndMsBySocketId = {};
+		// Reset sabotage state
+		isSabotageActive = false;
+		sabotageEndMs = 0;
+		sabotageUsedAuths = new Set();
+		if (sabotageTimeout) {
+			clearTimeout(sabotageTimeout);
+			sabotageTimeout = null;
+		}
 		const initialKillCooldownMs = Math.max(0, (gameConfig.killCooldownSeconds || 0) * 1000);
 		const startNow = Date.now();
-		for (const [id, socket] of io.of('/').sockets) {
-			if (socket.handshake.query.role === 'PLAYER') {
-				if (impostors.includes(id)) {
-					socket.emit('role', 'Impostor');
-					killCooldownEndMsBySocketId[id] = startNow + initialKillCooldownMs;
-					socket.emit('kill-cooldown-updated', { endMs: killCooldownEndMsBySocketId[id] });
-					console.log(id, 'is impostor');
-				} else {
-					socket.emit('role', 'Crewmate');
-					console.log(id, 'is crew');
-				}
-			}
+		// Phase 1: assign all impostors first
+		for (const id of impostors) {
+			const socket = io.of('/').sockets.get(id);
+			if (!socket || socket.handshake.query.role !== 'PLAYER') continue;
+			socket.emit('role', 'Impostor');
+			const a = authBySocketId[id] || id;
+			killCooldownEndMsByAuth[a] = startNow + initialKillCooldownMs;
+			killCooldownEndMsBySocketId[id] = killCooldownEndMsByAuth[a];
+			socket.emit('kill-cooldown-updated', { endMs: killCooldownEndMsBySocketId[id] });
+			console.log('[start-game] role-assigned', { socketId: id, auth: a, role: 'Impostor', killCooldownEndMs: killCooldownEndMsBySocketId[id] });
+		}
+		// Phase 2: assign the remaining players as crewmates
+		for (const id of playerIds) {
+			if (impostors.includes(id)) continue;
+			const socket = io.of('/').sockets.get(id);
+			if (!socket || socket.handshake.query.role !== 'PLAYER') continue;
+			socket.emit('role', 'Crewmate');
+			console.log('[start-game] role-assigned', { socketId: id, auth: authBySocketId[id] || id, role: 'Crewmate' });
 		}
 
-		// Pool of tasks so they are distributed evenly
-		let shuffledTasks = [];
+		// Assign tasks with per-player uniqueness and global per-task cap
+		const tasksPool = Array.isArray(gameConfig.tasks) ? gameConfig.tasks.slice() : [];
+		const maxPerTask = Math.max(1, Number(gameConfig.maxPlayersPerTask || 2));
+		const assignedCountByTask = {};
+		for (const t of tasksPool) assignedCountByTask[t] = 0;
 
-		// Dictionary with key as socket.id and value is array of tasks
+		// Track each player's assigned labels to enforce uniqueness
+		const playerTaskLabels = {};
 		const playerTasks = {};
-
-		// Assign tasks
 		taskProgress = {};
-		for (let i = 0; i < N_TASKS; i++) {
-			for (const player of players) {
-				// Make sure there's a pool of shuffled tasks
-				if (shuffledTasks.length === 0) {
-					shuffledTasks = _.shuffle(gameConfig.tasks);
-				}
+		for (const a of uniqueAuths) {
+			playerTaskLabels[a] = new Set();
+			playerTasks[a] = {};
+		}
 
-				if (!playerTasks[player.id]) {
-					playerTasks[player.id] = {};
+		for (let i = 0; i < N_TASKS; i++) {
+			for (const a of uniqueAuths) {
+				const labelSet = playerTaskLabels[a];
+				// Preferred candidates: not already assigned to this player AND under cap
+				let candidates = tasksPool.filter(t => !labelSet.has(t) && (assignedCountByTask[t] || 0) < maxPerTask);
+				// Fallback if cap is too strict: allow any not-yet-assigned-to-this-player
+				if (candidates.length === 0) {
+					candidates = tasksPool.filter(t => !labelSet.has(t));
 				}
+				// If still none, we cannot assign more unique tasks to this player
+				if (candidates.length === 0) {
+					continue;
+				}
+				// Choose among least-used tasks to balance distribution
+				const minCount = Math.min(...candidates.map(t => assignedCountByTask[t] || 0));
+				const leastUsed = candidates.filter(t => (assignedCountByTask[t] || 0) === minCount);
+				const taskLabel = _.shuffle(leastUsed)[0];
+
+				labelSet.add(taskLabel);
+				assignedCountByTask[taskLabel] = (assignedCountByTask[taskLabel] || 0) + 1;
 
 				const taskId = uuid();
-				playerTasks[player.id][taskId] = shuffledTasks.pop();
-
-				if (!impostors.includes(player.id)) {
+				playerTasks[a][taskId] = taskLabel;
+				console.log('[assign-task]', { auth: a, taskId, taskLabel });
+				if (!impostorAuths.has(a)) {
 					taskProgress[taskId] = false;
 				}
 			}
 		}
+		console.log('[assignment-summary] per-task counts', assignedCountByTask);
 
 		console.log('player tasks', playerTasks);
 
 		for (const [id, socket] of io.of('/').sockets) {
 			if (playerIds.includes(id)) {
-				socket.emit('tasks', playerTasks[id]);
+				const a = authBySocketId[id] || id;
+				socket.emit('tasks', playerTasks[a]);
+				console.log('[emit-tasks]', { socketId: id, auth: a, count: Object.keys(playerTasks[a] || {}).length });
+				// Also send completion snapshot and current progress for this auth
+				socket.emit('tasks-completed', getCompletionMapForAuth(a));
+				const vals = Object.values(taskProgress);
+				const ratio = vals.length ? vals.filter(Boolean).length / vals.length : 0;
+				socket.emit('progress', ratio);
 			}
+		}
+
+		// Persist assigned role and tasks by auth
+		for (const a of uniqueAuths) {
+			const role = impostorAuths.has(a) ? 'Impostor' : 'Crewmate';
+			authToPlayer[a] = authToPlayer[a] || {};
+			authToPlayer[a].role = role;
+			authToPlayer[a].tasks = playerTasks[a] || {};
 		}
 
 		emitTaskProgress();
@@ -217,6 +337,7 @@ io.on('connection', socket => {
 		lastMeetingType = null;
 		io.emit('game-started');
 		io.emit('cooldown-updated', { emergencyCooldownEndMs });
+		console.log('[game-started]');
 	});
 
 	socket.on('report', () => {
@@ -225,6 +346,7 @@ io.on('connection', socket => {
 		lastMeetingType = 'report';
 		io.emit('play-meeting');
 		io.emit('meeting-started');
+		console.log('[report]', { socketId: socket.id, auth: socketIdToAuth[socket.id] });
 	});
 
 	socket.on('emergency-meeting', () => {
@@ -234,6 +356,7 @@ io.on('connection', socket => {
 		lastMeetingType = 'emergency';
 		io.emit('play-meeting');
 		io.emit('meeting-started');
+		console.log('[emergency-meeting]', { socketId: socket.id, auth: socketIdToAuth[socket.id] });
 	});
 
 	socket.on('continue-game', () => {
@@ -248,12 +371,16 @@ io.on('connection', socket => {
 			if (sock) {
 				sock.emit('kill-cooldown-updated', { endMs: killCooldownEndMsBySocketId[id] });
 			}
+			const a = socketIdToAuth[id];
+			if (a) killCooldownEndMsByAuth[a] = now + killMs;
+			console.log('[cooldown-reset-after-meeting]', { socketId: id, auth: a, endMs: killCooldownEndMsBySocketId[id] });
 		}
 		if (lastMeetingType === 'emergency' && gameConfig.emergencyCooldownMinutes > 0) {
 			emergencyCooldownEndMs = Date.now() + gameConfig.emergencyCooldownMinutes * 60 * 1000;
 		}
 		io.emit('meeting-ended');
 		io.emit('cooldown-updated', { emergencyCooldownEndMs });
+		console.log('[meeting-ended]', { emergencyCooldownEndMs });
 	});
 
 	socket.on('end-game', () => {
@@ -262,9 +389,26 @@ io.on('connection', socket => {
 		isGameActive = false;
 		emergencyCooldownEndMs = 0;
 		impostorIds = new Set();
+		impostorAuths = new Set();
 		killCooldownEndMsBySocketId = {};
+		killCooldownEndMsByAuth = {};
+		// Clear sabotage
+		isSabotageActive = false;
+		sabotageEndMs = 0;
+		sabotageUsedAuths = new Set();
+		if (sabotageTimeout) {
+			clearTimeout(sabotageTimeout);
+			sabotageTimeout = null;
+		}
+		for (const key of Object.keys(authToPlayer)) {
+			if (authToPlayer[key]) {
+				authToPlayer[key].tasks = {};
+				authToPlayer[key].role = '';
+			}
+		}
 		io.emit('game-ended');
 		io.emit('cooldown-updated', { emergencyCooldownEndMs });
+		console.log('[game-ended]');
 	});
 
 	// Impostor kill attempt
@@ -276,7 +420,34 @@ io.on('connection', socket => {
 		if (now < endMs) return; // still cooling down
 		const cooldownMs = Math.max(0, (gameConfig.killCooldownSeconds || 0) * 1000);
 		killCooldownEndMsBySocketId[socket.id] = now + cooldownMs;
+		const a = socketIdToAuth[socket.id];
+		if (a) killCooldownEndMsByAuth[a] = killCooldownEndMsBySocketId[socket.id];
 		socket.emit('kill-cooldown-updated', { endMs: killCooldownEndMsBySocketId[socket.id] });
+		console.log('[kill]', { socketId: socket.id, auth: a, endMs: killCooldownEndMsBySocketId[socket.id] });
+	});
+
+	// Impostor sabotage attempt (one-time per impostor)
+	socket.on('sabotage', () => {
+		if (!isGameActive || isMeeting) return;
+		if (!impostorIds.has(socket.id)) return;
+		const a = socketIdToAuth[socket.id];
+		if (!a || sabotageUsedAuths.has(a)) return;
+		if (isSabotageActive && sabotageEndMs > Date.now()) return;
+		const durationMs = Math.max(0, (gameConfig.sabotageDurationSeconds || 0) * 1000);
+		const endMs = Date.now() + durationMs;
+		isSabotageActive = true;
+		sabotageEndMs = endMs;
+		sabotageUsedAuths.add(a);
+		io.emit('sabotage-started', { endMs });
+		// Also inform this impostor they've used their sabotage
+		socket.emit('sabotage-usage', { used: true });
+		if (sabotageTimeout) clearTimeout(sabotageTimeout);
+		sabotageTimeout = setTimeout(() => {
+			isSabotageActive = false;
+			sabotageEndMs = 0;
+			io.emit('sabotage-ended');
+			sabotageTimeout = null;
+		}, durationMs);
 	});
 
 	socket.on('task-complete', taskId => {
@@ -285,6 +456,11 @@ io.on('connection', socket => {
 			taskProgress[taskId] = true;
 		}
 		emitTaskProgress();
+		console.log('[task-complete]', { socketId: socket.id, auth: socketIdToAuth[socket.id], taskId });
+		const a = socketIdToAuth[socket.id];
+		if (a) {
+			socket.emit('tasks-completed', getCompletionMapForAuth(a));
+		}
 	});
 
 	socket.on('task-incomplete', taskId => {
@@ -293,6 +469,16 @@ io.on('connection', socket => {
 			taskProgress[taskId] = false;
 		}
 		emitTaskProgress();
+		console.log('[task-incomplete]', { socketId: socket.id, auth: socketIdToAuth[socket.id], taskId });
+		const a = socketIdToAuth[socket.id];
+		if (a) {
+			socket.emit('tasks-completed', getCompletionMapForAuth(a));
+		}
+	});
+
+	socket.on('disconnect', () => {
+		delete killCooldownEndMsBySocketId[socket.id];
+		delete socketIdToAuth[socket.id];
 	});
 });
 
@@ -301,10 +487,22 @@ function emitTaskProgress() {
 	const completed = tasks.filter(task => task).length;
 	const total = completed / tasks.length;
 	io.emit('progress', total);
+	console.log('[progress]', { completed, totalTasks: tasks.length, ratio: total });
 
 	if (total === 1) {
 		io.emit('play-win');
 	}
+}
+
+// Compute completion snapshot for a specific player auth
+function getCompletionMapForAuth(a) {
+	const info = authToPlayer[a];
+	const result = {};
+	if (!info || !info.tasks) return result;
+	for (const taskId of Object.keys(info.tasks)) {
+		result[taskId] = !!taskProgress[taskId];
+	}
+	return result;
 }
 
 server.listen(PORT, () => console.log(`Server listening on *:${PORT}`));
