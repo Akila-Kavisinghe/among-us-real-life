@@ -19,6 +19,11 @@ export default function Player() {
   const [audioReady, setAudioReady] = useState(false);
   const [sabotageEndMs, setSabotageEndMs] = useState(0);
   const isSabotageActive = sabotageEndMs > Date.now();
+  const [sabotageChargesRemaining, setSabotageChargesRemaining] = useState(0);
+  // Stopwatch state
+  const [stopwatchRunning, setStopwatchRunning] = useState(false);
+  const [stopwatchMs, setStopwatchMs] = useState(0);
+  const swLastTickRef = useRef(0);
 
   useEffect(() => {
     // Generate or load a per-tab auth token (so multiple tabs == multiple players)
@@ -51,9 +56,9 @@ export default function Player() {
     });
     socket.on('meeting-started', () => { console.log('[client] meeting-started'); setMeeting(true); });
     socket.on('meeting-ended', () => { console.log('[client] meeting-ended'); setMeeting(false); });
-    socket.on('game-started', () => { console.log('[client] game-started'); setGameActive(true); });
-    socket.on('game-ended', () => { console.log('[client] game-ended'); setGameActive(false); setMeeting(false); setTasks({}); setProgress(0); });
-    socket.on('state', (s) => { console.log('[client] state', s); setMeeting(!!s?.isMeeting); setGameActive(!!s?.isGameActive) });
+    socket.on('game-started', () => { console.log('[client] game-started'); stopAllSounds(); setGameActive(true); });
+    socket.on('game-ended', () => { console.log('[client] game-ended'); stopAllSounds(); setGameActive(false); setMeeting(false); setTasks({}); setProgress(0); });
+    socket.on('state', (s) => { console.log('[client] state', s); setMeeting(!!s?.isMeeting); setGameActive(!!s?.isGameActive); if (typeof s?.sabotageChargesRemaining === 'number') setSabotageChargesRemaining(s.sabotageChargesRemaining); });
     socket.on('sabotage-started', ({ endMs }) => {
       console.log('[client] sabotage-started', endMs);
       setSabotageEndMs(endMs || 0);
@@ -63,6 +68,9 @@ export default function Player() {
       console.log('[client] sabotage-ended');
       setSabotageEndMs(0);
       stopLoop();
+    });
+    socket.on('sabotage-charges', ({ remaining }) => {
+      setSabotageChargesRemaining(remaining || 0);
     });
     socket.on('sabotage-usage', ({ used }) => {
       // Could disable button client-side; we'll compute from this
@@ -150,6 +158,11 @@ export default function Player() {
     try { const el = audioRef.current; if (el) { el.pause(); el.currentTime = 0; } } catch (_) {}
   }
 
+  function stopAllSounds() {
+    try { stopLoop(); } catch (_) {}
+    try { const el = audioRef.current; if (el) { el.pause(); el.currentTime = 0; } } catch (_) {}
+  }
+
   async function enableAudio() {
     const el = audioRef.current;
     if (!el) return;
@@ -215,6 +228,35 @@ export default function Player() {
     } catch (_) {}
   }, [authId, isImpostor, tasks]);
 
+  // Stopwatch ticker
+  useEffect(() => {
+    if (!stopwatchRunning) return;
+    swLastTickRef.current = Date.now();
+    const id = setInterval(() => {
+      const now = Date.now();
+      const delta = now - swLastTickRef.current;
+      swLastTickRef.current = now;
+      setStopwatchMs((prev) => prev + delta);
+    }, 250);
+    return () => clearInterval(id);
+  }, [stopwatchRunning]);
+
+  function toggleStopwatch() {
+    setStopwatchRunning((r) => !r);
+  }
+  function resetStopwatch() {
+    setStopwatchMs(0);
+    setStopwatchRunning(false);
+  }
+  function formatTime(ms) {
+    const totalSec = Math.floor(ms / 1000);
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    return `${mm}:${ss}`;
+  }
+
   const hasTasks = Object.keys(tasks).length > 0;
   const [hasUsedSabotage, setHasUsedSabotage] = useState(false);
 
@@ -258,6 +300,12 @@ export default function Player() {
   return (
     <Stack spacing={2} alignItems="center" sx={{ width: '100%' }}>
       <Typography variant="overline">Player ({authId || '...'})</Typography>
+      {/* Stopwatch */}
+      <Stack spacing={1} direction="row" alignItems="center">
+        <Typography variant="h6" sx={{ minWidth: 72, textAlign: 'center' }}>{formatTime(stopwatchMs)}</Typography>
+        <Button size="small" variant="outlined" onClick={toggleStopwatch}>{stopwatchRunning ? 'Pause' : 'Start'}</Button>
+        <Button size="small" variant="text" onClick={resetStopwatch} disabled={stopwatchMs === 0}>Reset</Button>
+      </Stack>
       <Stack direction="row" spacing={2} alignItems="center" justifyContent="center">
         <Box component="img" src="/images/report.png" alt="Report" sx={{ width: 140, cursor: 'pointer', borderRadius: 1 }} onClick={() => socketRef.current?.emit('report')} />
         {isImpostor && (
@@ -278,9 +326,14 @@ export default function Player() {
       </Stack>
 
       {isImpostor && (
-        <Button variant="contained" color="error" disabled={hasUsedSabotage || isSabotageActive || !gameActive || meeting} onClick={() => socketRef.current?.emit('sabotage')}>
-          Sabotage
-        </Button>
+        <Stack spacing={1} alignItems="center">
+          <Button variant="contained" color="error" disabled={!gameActive || meeting || sabotageChargesRemaining <= 0} onClick={() => socketRef.current?.emit('sabotage')}>
+            Sabotage
+          </Button>
+          <Typography variant="caption" color={sabotageChargesRemaining > 0 ? 'text.secondary' : 'error'}>
+            Sabotage charges: {sabotageChargesRemaining}
+          </Typography>
+        </Stack>
       )}
 
       {role ? (

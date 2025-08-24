@@ -69,7 +69,9 @@ let gameConfig = {
 	// Max number of players that can receive the same task label
 	maxPlayersPerTask: 2,
 	// New: sabotage duration in seconds
-	sabotageDurationSeconds: 20
+	sabotageDurationSeconds: 20,
+	// New: shared sabotage charges for all impostors
+	sabotageCharges: 2
 };
 let emergencyCooldownEndMs = 0;
 let lastMeetingType = null; // 'emergency' | 'report' | null
@@ -85,6 +87,7 @@ let isSabotageActive = false;
 let sabotageEndMs = 0;
 let sabotageTimeout = null;
 let sabotageUsedAuths = new Set();
+let sabotageChargesRemaining = 0;
 
 app.use('/', express.static(path.join(__dirname, 'public')));
 
@@ -117,7 +120,7 @@ io.on('connection', socket => {
 	console.log('[connect] socket', socket.id, 'auth', auth);
 
 	// Send current state to newly connected clients
-	socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
+	socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs, sabotageChargesRemaining });
 
 	// If the connecting socket is an impostor, send its kill cooldown snapshot
 	if (isGameActive && impostorIds.has(socket.id)) {
@@ -142,18 +145,54 @@ io.on('connection', socket => {
 
 	// Allow clients to request a fresh snapshot of state
 	socket.on('get-state', () => {
-		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
+		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs, sabotageChargesRemaining });
 		console.log('[get-state]', { socketId: socket.id, auth: socketIdToAuth[socket.id], isMeeting, isGameActive, emergencyCooldownEndMs });
 	});
 
 	// Rehydration: client asks who am I with its auth
 	socket.on('whoami', (payload) => {
 		const incomingAuth = (payload && typeof payload === 'object' && payload.auth) ? String(payload.auth) : (socket.handshake.query.auth || socket.id);
-		const info = authToPlayer[incomingAuth];
+		// Update mapping so subsequent events use this auth
+		socketIdToAuth[socket.id] = incomingAuth;
+		let info = authToPlayer[incomingAuth];
+		// If not found, check if we accidentally stored by socket.id and migrate
+		if (!info && authToPlayer[socket.id]) {
+			authToPlayer[incomingAuth] = authToPlayer[socket.id];
+			delete authToPlayer[socket.id];
+			// Migrate impostor/auth cooldown mappings if present
+			if (impostorAuths.has(socket.id)) {
+				impostorAuths.delete(socket.id);
+				impostorAuths.add(incomingAuth);
+			}
+			if (typeof killCooldownEndMsByAuth[socket.id] !== 'undefined') {
+				killCooldownEndMsByAuth[incomingAuth] = killCooldownEndMsByAuth[socket.id];
+				delete killCooldownEndMsByAuth[socket.id];
+			}
+			info = authToPlayer[incomingAuth];
+		}
 		// Always send state snapshot
-		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs });
+		socket.emit('state', { isMeeting, isGameActive, emergencyCooldownEndMs, config: gameConfig, sabotageEndMs, sabotageChargesRemaining });
 		console.log('[whoami]', { socketId: socket.id, incomingAuth, found: !!info, role: info?.role, tasks: info ? Object.keys(info.tasks || {}).length : 0, impostor: impostorAuths.has(incomingAuth) });
-		if (!info) return;
+		if (!info) {
+			// If game is starting, assignment might still be in-flight. Retry once shortly.
+			setTimeout(() => {
+				const later = authToPlayer[incomingAuth];
+				if (!later) return;
+				if (later.role) socket.emit('role', later.role);
+				if (later.tasks) socket.emit('tasks', later.tasks);
+				socket.emit('tasks-completed', getCompletionMapForAuth(incomingAuth));
+				const vals = Object.values(taskProgress);
+				const ratio = vals.length ? vals.filter(Boolean).length / vals.length : 0;
+				socket.emit('progress', ratio);
+				if (impostorAuths.has(incomingAuth)) {
+					impostorIds.add(socket.id);
+					const endMs = killCooldownEndMsByAuth[incomingAuth] || 0;
+					killCooldownEndMsBySocketId[socket.id] = endMs;
+					socket.emit('kill-cooldown-updated', { endMs });
+				}
+			}, 300);
+			return;
+		}
 		if (info.role) socket.emit('role', info.role);
 		if (info.tasks) socket.emit('tasks', info.tasks);
 		socket.emit('tasks-completed', getCompletionMapForAuth(incomingAuth));
@@ -195,6 +234,9 @@ io.on('connection', socket => {
 			if (typeof payload.sabotageDurationSeconds === 'number' && payload.sabotageDurationSeconds >= 0) {
 				gameConfig.sabotageDurationSeconds = payload.sabotageDurationSeconds;
 			}
+			if (typeof payload.sabotageCharges === 'number' && payload.sabotageCharges >= 0) {
+				gameConfig.sabotageCharges = payload.sabotageCharges;
+			}
 		}
 		console.log('[start-game] config', gameConfig);
 		// Get player sockets
@@ -233,6 +275,7 @@ io.on('connection', socket => {
 		isSabotageActive = false;
 		sabotageEndMs = 0;
 		sabotageUsedAuths = new Set();
+		sabotageChargesRemaining = Math.max(0, Number(gameConfig.sabotageCharges || 0));
 		if (sabotageTimeout) {
 			clearTimeout(sabotageTimeout);
 			sabotageTimeout = null;
@@ -328,6 +371,9 @@ io.on('connection', socket => {
 			authToPlayer[a].tasks = playerTasks[a] || {};
 		}
 
+		// Broadcast initial sabotage charges to all clients
+		io.emit('sabotage-charges', { remaining: sabotageChargesRemaining });
+
 		emitTaskProgress();
 
 		// Start game state
@@ -400,6 +446,7 @@ io.on('connection', socket => {
 			clearTimeout(sabotageTimeout);
 			sabotageTimeout = null;
 		}
+		sabotageChargesRemaining = 0;
 		for (const key of Object.keys(authToPlayer)) {
 			if (authToPlayer[key]) {
 				authToPlayer[key].tasks = {};
@@ -431,14 +478,18 @@ io.on('connection', socket => {
 		if (!isGameActive || isMeeting) return;
 		if (!impostorIds.has(socket.id)) return;
 		const a = socketIdToAuth[socket.id];
-		if (!a || sabotageUsedAuths.has(a)) return;
+		if (!a) return;
+		if (sabotageUsedAuths.has(a)) return;
 		if (isSabotageActive && sabotageEndMs > Date.now()) return;
+		if (sabotageChargesRemaining <= 0) return;
 		const durationMs = Math.max(0, (gameConfig.sabotageDurationSeconds || 0) * 1000);
 		const endMs = Date.now() + durationMs;
 		isSabotageActive = true;
 		sabotageEndMs = endMs;
 		sabotageUsedAuths.add(a);
+		sabotageChargesRemaining = Math.max(0, sabotageChargesRemaining - 1);
 		io.emit('sabotage-started', { endMs });
+		io.emit('sabotage-charges', { remaining: sabotageChargesRemaining });
 		// Also inform this impostor they've used their sabotage
 		socket.emit('sabotage-usage', { used: true });
 		if (sabotageTimeout) clearTimeout(sabotageTimeout);

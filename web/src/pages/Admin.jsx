@@ -23,6 +23,7 @@ export default function Admin() {
   const [killCooldownSeconds, setKillCooldownSeconds] = useState('0');
   const [maxPlayersPerTask, setMaxPlayersPerTask] = useState('2');
   const [sabotageSeconds, setSabotageSeconds] = useState('20');
+  const [sabotageCharges, setSabotageCharges] = useState('2');
   const [cooldownRemainingMs, setCooldownRemainingMs] = useState(0);
 
   useEffect(() => {
@@ -52,6 +53,7 @@ export default function Admin() {
         if (typeof s.config.killCooldownSeconds === 'number') setKillCooldownSeconds(String(s.config.killCooldownSeconds));
         if (typeof s.config.maxPlayersPerTask === 'number') setMaxPlayersPerTask(String(s.config.maxPlayersPerTask));
         if (typeof s.config.sabotageDurationSeconds === 'number') setSabotageSeconds(String(s.config.sabotageDurationSeconds));
+        if (typeof s.config.sabotageCharges === 'number') setSabotageCharges(String(s.config.sabotageCharges));
       }
     });
 
@@ -92,7 +94,8 @@ export default function Admin() {
       emergencyCooldownMinutes: Number.isFinite(parseFloat(cooldownMinutes)) ? parseFloat(cooldownMinutes) : 0,
       killCooldownSeconds: Number.isFinite(parseFloat(killCooldownSeconds)) ? parseFloat(killCooldownSeconds) : 0,
       maxPlayersPerTask: Number.isFinite(parseInt(maxPlayersPerTask, 10)) ? parseInt(maxPlayersPerTask, 10) : undefined,
-      sabotageDurationSeconds: Number.isFinite(parseInt(sabotageSeconds, 10)) ? parseInt(sabotageSeconds, 10) : undefined
+      sabotageDurationSeconds: Number.isFinite(parseInt(sabotageSeconds, 10)) ? parseInt(sabotageSeconds, 10) : undefined,
+      sabotageCharges: Number.isFinite(parseInt(sabotageCharges, 10)) ? parseInt(sabotageCharges, 10) : undefined
     };
     socketRef.current?.emit('start-game', payload);
   }
@@ -176,6 +179,7 @@ export default function Admin() {
                   <TextField label="Emergency Cooldown (minutes)" value={cooldownMinutes} onChange={(e) => setCooldownMinutes(e.target.value)} inputMode="decimal" fullWidth />
                   <TextField label="Kill Cooldown (seconds)" value={killCooldownSeconds} onChange={(e) => setKillCooldownSeconds(e.target.value)} inputMode="decimal" fullWidth />
                   <TextField label="Sabotage Duration (seconds)" value={sabotageSeconds} onChange={(e) => setSabotageSeconds(e.target.value)} inputMode="numeric" fullWidth />
+                  <TextField label="Sabotage Charges (shared)" value={sabotageCharges} onChange={(e) => setSabotageCharges(e.target.value)} inputMode="numeric" fullWidth />
                   <TextField label="Max Players per Task" value={maxPlayersPerTask} onChange={(e) => setMaxPlayersPerTask(e.target.value)} inputMode="numeric" fullWidth />
                   <Stack direction="row" spacing={1}>
                     <TextField label="Task" value={taskName} onChange={(e) => setTaskName(e.target.value)} fullWidth />
